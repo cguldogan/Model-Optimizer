@@ -16,7 +16,8 @@
 from .aa_timing import AATiming
 from .acceptance_rate import AcceptanceRate
 from .mtbench import MTBench
+from .server_spec_decode import ServerSpecDecode
 from .specbench import SpecBench
 from .timing import Timing
 
-__all__ = ["AATiming", "AcceptanceRate", "MTBench", "SpecBench", "Timing"]
+__all__ = ["AATiming", "AcceptanceRate", "MTBench", "ServerSpecDecode", "SpecBench", "Timing"]

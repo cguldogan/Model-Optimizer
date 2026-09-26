@@ -34,6 +34,7 @@ engines_available = {
     "SGLANG": models.SGLANGModel,
     "AUTO_DEPLOY": models.AutoDeployModel,
     "SPECBENCH_MEDUSA": models.SpecBenchMedusaModel,
+    "CLIENT": models.ClientModel,
 }
 
 # Translation table for --max_seq_len. Each engine spells the same
@@ -178,6 +179,9 @@ def run_simple(args):
                 f"or extend _MAX_SEQ_LEN_KEY in run.py."
             )
         engine_args[key] = args.max_seq_len
+    if args.engine == "CLIENT":
+        engine_args["base_url"] = args.base_url
+        engine_args["api_key"] = args.api_key
     sampling_kwargs = args.runtime_params.get("sampling_kwargs", {"temperature": 0})
     if args.temperature is not None:
         sampling_kwargs["temperature"] = args.temperature
@@ -206,6 +210,8 @@ def run_simple(args):
         metrics_list.insert(0, metrics.SpecBench(requests=dataset.data))
     else:
         metrics_list.insert(0, metrics.AcceptanceRate())
+    if args.engine == "CLIENT":
+        metrics_list.append(metrics.ServerSpecDecode(args.base_url, args.api_key))
 
     if args.save_dir is not None:
         for metric in metrics_list:
@@ -308,7 +314,26 @@ if __name__ == "__main__":
         choices=["EAGLE3", "EAGLE", "DRAFT_TARGET", "NGRAM", "MTP", "DFLASH", "DSPARK", "NONE"],
         help="Speculative algorithm to use",
     )
-    parser.add_argument("--model_dir", type=str, required=True, help="Path to the model directory")
+    parser.add_argument(
+        "--model_dir",
+        type=str,
+        required=True,
+        help="Path to the model directory, or the served model name with --engine CLIENT",
+    )
+    parser.add_argument(
+        "--base_url",
+        type=str,
+        required=False,
+        default=None,
+        help="OpenAI-compatible server to benchmark with --engine CLIENT, e.g. http://host:8000/v1",
+    )
+    parser.add_argument(
+        "--api_key",
+        type=str,
+        required=False,
+        default=None,
+        help="Bearer token for --engine CLIENT. Defaults to the OPENAI_API_KEY environment variable.",
+    )
     parser.add_argument(
         "--draft_model_dir",
         type=str,

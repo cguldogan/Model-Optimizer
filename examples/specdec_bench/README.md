@@ -145,6 +145,42 @@ python3 run.py \
     --runtime_params runtime_args_long_context.yaml
 ```
 
+### Benchmarking a running server (client mode)
+
+`--engine CLIENT` benchmarks a server that is already running instead of loading the model
+in-process. This helps when the deployment is multi-node or already running with its own
+patches, or when the GPUs are shared. Use it with a vLLM server that supports `return_token_ids`
+(vLLM >= 0.10.2). The client needs no GPU, and neither vLLM nor SGLang nor TRT-LLM has to be
+installed. Pass the served model name as `--model_dir` and the server's tokenizer as `--tokenizer`:
+
+```bash
+python3 run.py \
+    --engine CLIENT \
+    --base_url http://spark-head:8000/v1 \
+    --model_dir <served-model-name> \
+    --tokenizer /path/to/tokenizer \
+    --mtbench question.jsonl \
+    --output_length 1024 \
+    --concurrency 8 \
+    --tp_size 2 \
+    --save_dir results/client
+```
+
+Prompts are tokenized and chat-templated on the client, then sent as token ids to
+`/v1/completions` with streaming on. Each streamed chunk counts as one engine step, so the
+acceptance length comes from chunk sizes, the same way the in-process vLLM wrapper measures it.
+The server owns the speculative-decoding setup, so `--draft_model_dir`, `--draft_length` and
+`--speculative_algorithm` do nothing in this mode. `--api_key` (or `OPENAI_API_KEY`) sets a bearer
+token. `--runtime_params` `engine_args.timeout` sets a per-request timeout, and
+`engine_args.extra_body` is merged into every request.
+
+The run also writes `server_spec_decode.json`. It holds the acceptance the server itself reports,
+taken from the difference in its `vllm:spec_decode_*` Prometheus counters over the run. These
+counters are server-wide, so any other traffic during the run is counted too. The run warns when
+requests are already running at start. Compare `Server_Generation_Tokens` with the client's output
+token count. A server started with `--stream-interval` greater than 1 merges steps into one chunk,
+which inflates the client-side acceptance length.
+
 ## Uploading results to S3
 
 Each `run.py` invocation writes a result directory containing `configuration.json`,
