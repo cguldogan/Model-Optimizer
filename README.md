@@ -16,6 +16,90 @@
 
 ______________________________________________________________________
 
+> [!NOTE]
+> **This is a personal fork of [NVIDIA/Model-Optimizer](https://github.com/NVIDIA/Model-Optimizer).**
+> It adds one feature, **client mode for `specdec_bench`**, on the
+> `feat/specdec-bench-client-mode` branch. Everything else follows upstream. The fork is kept for our
+> own use and is not meant to be merged back.
+
+## About this fork: benchmarking a running server with `specdec_bench`
+
+Upstream [`specdec_bench`](./examples/specdec_bench) loads the model itself, inside vLLM, SGLang or
+TRT-LLM on the machine that runs the benchmark. It cannot measure a deployment that is already
+serving. That rules out our DGX Sparks: they serve GLM-5.3-Flash with tensor parallelism across two
+nodes (head on `martin`, worker on `olivia`), with a custom set of patches and the DFlash2 drafter.
+That setup uses nearly all of both GPUs, and `specdec_bench` cannot span two nodes anyway.
+
+This fork adds **`--engine CLIENT`**, which benchmarks a running vLLM server over HTTP instead.
+
+**What it gives us**
+
+- **We can benchmark the deployment we actually run**, including its patches, multi-node setup and
+  drafter, without taking the Sparks down or reserving GPU memory for a second copy of the model.
+- **The same metrics and outputs as upstream.** MT-Bench, SpecBench, SPEED-Bench and random-token
+  datasets all work, and the run writes the usual `acceptance_rate.json`, `timing.json` and
+  per-category acceptance length (AL). Results can be compared directly with in-process runs.
+- **The server's own view of acceptance.** Each run also writes `server_spec_decode.json`, built from
+  the change in the server's `vllm:spec_decode_*` Prometheus counters. It gives server-side average
+  AL, draft acceptance rate, and acceptance for each draft position. This checks the client-side
+  numbers.
+- **A warning when the numbers are contaminated.** The counters are server-wide. The run warns when
+  other requests are already running at start, and reports the server's generated-token count so
+  you can compare it with the client's.
+- **No GPU and no engine install on the client.** The benchmark runs from a laptop and needs only
+  Python with `transformers` and `httpx`.
+
+**How it works.** Prompts are chat-templated and tokenized on the client, then sent as token ids to
+`/v1/completions` with streaming on. vLLM streams one chunk per decoding step, and each chunk
+carries `token_ids` (vLLM's `return_token_ids`, available from vLLM 0.10.2). The number of tokens in
+a chunk is that step's accepted draft tokens plus one. This is the same per-step signal that
+upstream's in-process vLLM wrapper reads.
+
+**Run it against the Sparks**
+
+```bash
+cd examples/specdec_bench
+python3 run.py \
+    --engine CLIENT \
+    --base_url http://100.90.44.53:8888/v1 \
+    --model_dir GLM-5.3-Flash-EXL3 \
+    --tokenizer /path/to/glm-tokenizer \
+    --mtbench question.jsonl \
+    --output_length 1024 \
+    --concurrency 2 \
+    --tp_size 2 \
+    --save_dir results/glm-sparks
+```
+
+- `--model_dir` is the served model name.
+- `--tokenizer` must be the server's tokenizer and chat template. For GLM, copy `tokenizer*.json`
+  from the model snapshot on `martin` and use the deployment's `files/chat_template.jinja` as the
+  chat template.
+- The server runs with `--max-num-seqs 2`. Any higher concurrency just waits in the server's queue,
+  and that wait shows up as time to first token.
+
+**First results** (2026-09-26): GLM-5.3-Flash with the DFlash2 drafter (7 draft tokens), TP=2 across
+two Sparks, full MT-Bench (80 questions, 2 turns each), 1024 output tokens.
+
+| Metric | Value |
+|---|---|
+| Average acceptance length, averaged per request | 3.88 |
+| Acceptance length over all tokens (client / server counters) | 3.39 / 3.44 |
+| Acceptance at each draft position, 1 → 7 | 0.75, 0.54, 0.38, 0.28, 0.20, 0.16, 0.12 |
+| Acceptance length by category | math 5.68 · extraction 5.23 · coding 4.39 · reasoning 3.65 · writing 3.26 · stem 3.24 · roleplay 2.89 · humanities 2.71 |
+| Tokens per second for one request (median) | 28 |
+
+One other request was running on the server during this run. About 4% of the server's generated
+tokens were not ours, so these acceptance numbers are reliable but the latency figures are not.
+
+The full usage notes are in the
+[client mode section](./examples/specdec_bench/README.md#benchmarking-a-running-server-client-mode)
+of the `specdec_bench` README. The code is in
+[`models/client.py`](./examples/specdec_bench/specdec_bench/models/client.py) and
+[`metrics/server_spec_decode.py`](./examples/specdec_bench/specdec_bench/metrics/server_spec_decode.py).
+
+______________________________________________________________________
+
 **NVIDIA Model Optimizer** (referred to as **Model Optimizer**, or **ModelOpt**) is a library comprising state-of-the-art model optimization [techniques](#techniques) including quantization, pruning, Neural Architecture Search (NAS), distillation, speculative decoding and sparsity to accelerate models.
 
 **[Input]** Model Optimizer currently supports inputs of a [Hugging Face](https://huggingface.co/), [PyTorch](https://github.com/pytorch/pytorch) or [ONNX](https://github.com/onnx/onnx) model.
