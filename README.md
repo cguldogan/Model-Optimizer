@@ -78,19 +78,31 @@ python3 run.py \
 - The server runs with `--max-num-seqs 2`. Any higher concurrency just waits in the server's queue,
   and that wait shows up as time to first token.
 
-**First results** (2026-09-26): GLM-5.3-Flash with the DFlash2 drafter (7 draft tokens), TP=2 across
-two Sparks, full MT-Bench (80 questions, 2 turns each), 1024 output tokens.
+**Results** (2026-09-28): GLM-5.3-Flash with the DFlash2 drafter (7 draft tokens), TP=2 across two
+Sparks, full MT-Bench (80 questions, 2 turns each), 1024 output tokens, `--concurrency 2`, idle
+server.
 
 | Metric | Value |
 |---|---|
-| Average acceptance length, averaged per request | 3.88 |
-| Acceptance length over all tokens (client / server counters) | 3.39 / 3.44 |
-| Acceptance at each draft position, 1 → 7 | 0.75, 0.54, 0.38, 0.28, 0.20, 0.16, 0.12 |
-| Acceptance length by category | math 5.68 · extraction 5.23 · coding 4.39 · reasoning 3.65 · writing 3.26 · stem 3.24 · roleplay 2.89 · humanities 2.71 |
-| Tokens per second for one request (median) | 28 |
+| Average acceptance length, averaged per request | 3.87 |
+| Acceptance length over all tokens (client / server counters) | 3.39 / 3.41 |
+| Draft acceptance rate | 34.4% |
+| Acceptance at each draft position, 1 → 7 | 0.75, 0.54, 0.38, 0.27, 0.20, 0.15, 0.12 |
+| Acceptance length by category | math 5.54 · extraction 5.33 · coding 4.31 · reasoning 3.68 · writing 3.25 · stem 3.22 · roleplay 2.90 · humanities 2.74 |
+| Time to first token (median) | 0.72 s |
+| End-to-end time per turn (median) | 39 s |
+| Tokens per second for one request (median) | 24 |
+| Total output tokens per second | 46 |
 
-One other request was running on the server during this run. About 4% of the server's generated
-tokens were not ours, so these acceptance numbers are reliable but the latency figures are not.
+This run also checks client mode against the server. The server generated 133,612 tokens during
+the run, exactly as many as the client received. The client counted 39,360 steps and the server
+39,200 drafts. The difference of 160 is the first step of each of the 160 turns, which produces a
+token but no draft.
+
+An earlier run on 2026-09-26 used `--concurrency 8` while another request was running on the
+server. Its acceptance numbers were almost the same (3.88 per request, 3.44 on the server), but
+its median time to first token was 144 s. That was time spent waiting in the queue: the server
+runs at most 2 requests at once (`--max-num-seqs 2`), and one slot was taken by the other request.
 
 The full usage notes are in the
 [client mode section](./examples/specdec_bench/README.md#benchmarking-a-running-server-client-mode)
