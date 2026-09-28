@@ -12,6 +12,77 @@ These instructions apply to AI-assisted work in this repository.
   those skills through relative symlinks. Shared agent config and scripts
   remain under `.agents/`. See `.agents/README.md` for the convention.
 
+## This fork: specdec_bench client mode
+
+This is a personal fork. Its only addition is `--engine CLIENT` in `examples/specdec_bench`
+(`specdec_bench/models/client.py`, `specdec_bench/metrics/server_spec_decode.py`, tests in
+`tests/examples/specdec_bench/test_client.py`). It is not upstreamed; never open a PR to NVIDIA.
+Work on the `feat/specdec-bench-client-mode` branch, which is also the fork's default branch.
+
+### Unit tests (no GPU, no server)
+
+Use a uv venv on Python 3.12. The macOS system `python3` (3.14) has broken arm64/x86_64 wheels.
+`tests/conftest.py` imports torch and modelopt, and `pyproject.toml` adds cov, instafail and
+timeout flags, so all of these are required even for this small suite:
+
+```bash
+uv venv -p 3.12 .venv
+VIRTUAL_ENV=.venv uv pip install -e . torch httpx numpy pyyaml transformers tqdm datasets rich \
+    seaborn tiktoken jinja2 boto3 pytest pytest-cov pytest-instafail pytest-timeout pre-commit
+.venv/bin/python -m pytest tests/examples/specdec_bench -q --no-cov   # expect 56 passed
+.venv/bin/pre-commit run --files <changed files>                    # ruff, mypy, markdownlint, license
+```
+
+### Live benchmark against the DGX Sparks
+
+The Sparks are `Martin` (head) and `Olivia` (worker). Reach them with `ssh Martin` / `ssh Olivia`
+through the NVIDIA Sync ssh_config; plain `ssh martin` fails the host-key check. They serve
+GLM-5.3-Flash (DFlash2 drafter, 7 draft tokens) with TP=2 across both nodes, at
+`http://100.90.44.53:8888/v1` over Tailscale, with `--max-num-seqs 2`. GPU memory is full, so
+only `--engine CLIENT` works. Never stop or restart the `glm53-exl3-*` containers without the
+user's approval. Run the client from the Mac.
+
+1. Check that the server is up and idle. If requests are running, the numbers will be
+   contaminated: wait, or tell the user.
+
+   ```bash
+   curl -s http://100.90.44.53:8888/metrics | grep -E '^vllm:num_requests_(running|waiting)\{'
+   ```
+
+2. Fetch the server's tokenizer and chat template, and the MT-Bench prompts, once:
+
+   ```bash
+   W=~/specdec-runs; mkdir -p $W/glm-tok
+   ssh Martin 'cd ~/.cache/huggingface/hub/models--Mia-AiLab--GLM-5.3-Flash-EXL3-TR3-4bpw/snapshots/*/ && tar chzf - tokenizer_config.json tokenizer.json config.json generation_config.json -C ~/src/GLM-5.3-Flash-EXL3-2x-DGX-Sparks/files chat_template.jinja' | tar xzf - -C $W/glm-tok
+   curl -sL -o $W/question.jsonl https://huggingface.co/datasets/HuggingFaceH4/mt_bench_prompts/resolve/main/raw/question.jsonl   # 80 lines
+   ```
+
+3. Do a smoke run (about 30 s), then the full run (about 50 min). Run the full one in the
+   background and watch its log for tqdm progress, `Traceback`, or `Error processing`.
+
+   ```bash
+   cd examples/specdec_bench
+   bench() { ../../.venv/bin/python run.py --engine CLIENT --base_url http://100.90.44.53:8888/v1 \
+       --model_dir GLM-5.3-Flash-EXL3 --tokenizer $W/glm-tok --mtbench $W/question.jsonl --tp_size 2 "$@"; }
+   bench --num_requests 2 --output_length 256 --concurrency 1 --save_dir $W/smoke
+   bench --output_length 1024 --concurrency 2 --show_progress --save_dir $W/mtbench-$(date +%F) \
+       > $W/mtbench-$(date +%F).log 2>&1
+   ```
+
+   Keep `--concurrency` at 2 or lower. Anything higher only waits in the server queue and
+   inflates time to first token.
+
+4. Validate before you report numbers. The log must not contain `already has N request(s)
+   running`. In `server_spec_decode.json`, `Server_Generation_Tokens` must equal the client's
+   token count, which is the sum of `length × count` over `Acceptance_Length_Histogram` in
+   `acceptance_rate.json`. The client's step count should exceed the server's `Num_Drafts` by
+   exactly the number of turns (160 for full MT-Bench).
+
+5. Report `Average_AL` (the per-request mean), the acceptance length over all tokens from the
+   client and from the server, the per-position acceptance rates, `Category_AL`, and the median
+   time to first token and request tokens/s from `timing.json`. Compare them against the results
+   table in `README.md`, and update that table only if the user asks.
+
 ## Coding guidelines
 
 - **Coding guide:** Code development and review require reading and following
