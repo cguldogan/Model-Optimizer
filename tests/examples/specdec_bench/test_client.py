@@ -20,8 +20,8 @@ import json
 
 import httpx
 import pytest
-from specdec_bench.metrics.server_spec_decode import ServerSpecDecode, parse_vllm_metrics
-from specdec_bench.models.client import ClientModel
+from specdec_bench.metrics.server_spec_decode import ServerSpecDecode, parse_metrics
+from specdec_bench.models.client import ClientModel, split_rounds
 
 EOS = 2
 
@@ -100,6 +100,62 @@ def test_missing_token_ids_fails_loudly():
         _run(_model(_stream([{"text": "hi"}])))
 
 
+# A byte-level tokenizer: 13 and 14 are the two UTF-8 bytes of "é", EOS decodes as text.
+_PIECES = {10: b"He", 11: b"llo", 12: b" w", 13: b"\xc3", 14: b"\xa9", 15: b"!", EOS: b"<eos>"}
+
+
+class _ByteTokenizer:
+    def decode(self, ids, skip_special_tokens=False):
+        return b"".join(_PIECES[i] for i in ids).decode("utf-8", errors="replace")
+
+
+def _texts(*texts):
+    return [(text, float(i)) for i, text in enumerate(texts, 1)]
+
+
+def test_split_rounds_recovers_rounds_across_a_split_character():
+    # Rounds [10, 11], [12, 13, 14], [15, EOS]: "é" is whole by the end of the second round.
+    ids = [10, 11, 12, 13, 14, 15, EOS]
+    steps, times = split_rounds(ids, _texts("Hello", " wé", "!"), _ByteTokenizer().decode, 9.0)
+    assert steps == [[10, 11], [12, 13, 14], [15, EOS]]
+    assert times == [1.0, 2.0, 3.0]
+
+
+def test_split_rounds_merges_a_round_that_streams_no_text():
+    # Rounds [10, 11], [12, 13], [14, 15], [EOS]: the second ends inside "é", so streams nothing.
+    ids = [10, 11, 12, 13, 14, 15, EOS]
+    steps, times = split_rounds(ids, _texts("Hello", " wé!"), _ByteTokenizer().decode, 9.0)
+    assert steps == [[10, 11], [12, 13, 14, 15, EOS]]
+    assert times == [1.0, 2.0]
+
+
+def test_split_rounds_without_text_is_one_step():
+    assert split_rounds([EOS], [], _ByteTokenizer().decode, 9.0) == ([[EOS]], [9.0])
+
+
+def _tensorfold_sse(texts, token_ids):
+    events = [{"choices": [{"index": 0, "text": text, "finish_reason": None}]} for text in texts]
+    end = {"choices": [{"index": 0, "text": "", "finish_reason": "stop"}]}
+    end["tensorfold"] = {"rounds": len(texts), "token_ids": token_ids}
+    lines = [f"data: {json.dumps(event)}\n\n" for event in [*events, end]]
+    return "".join(lines) + "data: [DONE]\n\n"
+
+
+def test_text_stream_with_reply_ids_is_split_into_rounds():
+    sse = _tensorfold_sse(["Hello", " wé", "!"], [10, 11, 12, 13, 14, 15, EOS])
+    model = _model(lambda request: httpx.Response(200, text=sse))
+    model._tokenizer = _ByteTokenizer()
+    out = _run(model)
+    assert out["output_ids"] == [[[10, 11], [12, 13, 14], [15]]]
+    assert len(out["token_times"]) == 4
+
+
+def test_stream_error_is_raised():
+    sse = 'data: {"error": {"message": "boom"}}\n\ndata: [DONE]\n\n'
+    with pytest.raises(RuntimeError, match="boom"):
+        _run(_model(lambda request: httpx.Response(200, text=sse)))
+
+
 def test_http_error_is_raised_with_status():
     model = _model(lambda request: httpx.Response(404, text="model not found"))
     with pytest.raises(RuntimeError, match="404: model not found"):
@@ -130,7 +186,7 @@ def _metrics_text(drafts, draft_tokens, accepted, per_pos, generated=0, running=
 
 def test_parse_sums_engines_and_keys_positions():
     text = _metrics_text(10, 30, 12, [7, 5]) + "\n" + _metrics_text(10, 30, 8, [5, 3])
-    counters = parse_vllm_metrics(text.replace('engine="0"', 'engine="1"', 5))
+    counters = parse_metrics(text.replace('engine="0"', 'engine="1"', 5))
     assert counters[("vllm:spec_decode_num_drafts_total", None)] == 20
     assert counters[("vllm:spec_decode_num_accepted_tokens_total", None)] == 20
     assert counters[("vllm:spec_decode_num_accepted_tokens_per_pos_total", 0)] == 12
@@ -172,3 +228,42 @@ def test_server_metric_tolerates_unreachable_metrics(monkeypatch, tmp_path):
     metric.directory = str(tmp_path)
     metric.process_final([])
     assert metric.out == {}
+
+
+def _tensorfold_metrics_text(rounds, drafted, accepted, generated=0, running=0):
+    return "\n".join(
+        [
+            "# HELP tensorfold:requests_running Requests in prefill or decode.",
+            f"tensorfold:requests_running {running}",
+            f"tensorfold:generation_tokens_total {generated}",
+            f"tensorfold:mtp_drafted_total {drafted}",
+            f"tensorfold:mtp_accepted_total {accepted}",
+            'tensorfold:request_latency_seconds_bucket{le="0.5"} 2',
+            f"tensorfold_health:rounds_total {rounds}",
+        ]
+    )
+
+
+def test_server_metric_reads_tensorfold_counters(monkeypatch, tmp_path):
+    snapshots = iter(
+        [
+            _tensorfold_metrics_text(100, 600, 200, generated=1000, running=1),
+            _tensorfold_metrics_text(140, 900, 290, generated=1131),
+        ]
+    )
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda url, **kwargs: httpx.Response(
+            200, text=next(snapshots), request=httpx.Request("GET", url)
+        ),
+    )
+    metric = ServerSpecDecode("http://server:8000/v1")
+    metric.directory = str(tmp_path)
+    metric.process_final([])
+    assert metric.out["Requests_Running_At_Start"] == 1
+    assert metric.out["Server_Generation_Tokens"] == 131
+    assert metric.out["Num_Drafts"] == 40
+    assert metric.out["Average_AL"] == pytest.approx(1 + 90 / 40)
+    assert metric.out["Draft_Acceptance_Rate"] == pytest.approx(90 / 300)
+    assert metric.out["Per_Position_Acceptance_Rate"] == {}

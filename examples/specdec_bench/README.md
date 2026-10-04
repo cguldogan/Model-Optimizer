@@ -150,7 +150,7 @@ python3 run.py \
 `--engine CLIENT` benchmarks a server that is already running instead of loading the model
 in-process. This helps when the deployment is multi-node or already running with its own
 patches, or when the GPUs are shared. Use it with a vLLM server that supports `return_token_ids`
-(vLLM >= 0.10.2). The client needs no GPU, and neither vLLM nor SGLang nor TRT-LLM has to be
+(vLLM >= 0.10.2), or with a tensorfold server. The client needs no GPU, and neither vLLM nor SGLang nor TRT-LLM has to be
 installed. Pass the served model name as `--model_dir` and the server's tokenizer as `--tokenizer`:
 
 ```bash
@@ -180,6 +180,14 @@ counters are server-wide, so any other traffic during the run is counted too. Th
 requests are already running at start. Compare `Server_Generation_Tokens` with the client's output
 token count. A server started with `--stream-interval` greater than 1 merges steps into one chunk,
 which inflates the client-side acceptance length.
+
+tensorfold streams text instead of token ids, one chunk per decoding round, and returns the reply's
+token ids in the last chunk. The client splits those ids back into rounds by decoding them the way
+the server streams them, so `--tokenizer` must be the server's tokenizer. A round that ends inside
+a multi-byte character streams no text and is merged into the next round, which inflates the
+client-side acceptance length slightly (0.1% on a GLM MT-Bench run). The server-side numbers come
+from `tensorfold:mtp_*` and `tensorfold_health:rounds_total`. They count finished requests only and
+have no per-position acceptance.
 
 ## Uploading results to S3
 

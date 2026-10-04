@@ -29,7 +29,7 @@ timeout flags, so all of these are required even for this small suite:
 uv venv -p 3.12 .venv
 VIRTUAL_ENV=.venv uv pip install -e . torch httpx numpy pyyaml transformers tqdm datasets rich \
     seaborn tiktoken jinja2 boto3 pytest pytest-cov pytest-instafail pytest-timeout pre-commit
-.venv/bin/python -m pytest tests/examples/specdec_bench -q --no-cov   # expect 56 passed
+.venv/bin/python -m pytest tests/examples/specdec_bench -q --no-cov   # expect 62 passed
 .venv/bin/pre-commit run --files <changed files>                    # ruff, mypy, markdownlint, license
 ```
 
@@ -37,16 +37,18 @@ VIRTUAL_ENV=.venv uv pip install -e . torch httpx numpy pyyaml transformers tqdm
 
 The Sparks are `Martin` (head) and `Olivia` (worker). Reach them with `ssh Martin` / `ssh Olivia`
 through the NVIDIA Sync ssh_config; plain `ssh martin` fails the host-key check. They serve
-GLM-5.3-Flash (DFlash2 drafter, 7 draft tokens) with TP=2 across both nodes, at
-`http://100.90.44.53:8888/v1` over Tailscale, with `--max-num-seqs 2`. GPU memory is full, so
-only `--engine CLIENT` works. Never stop or restart the `glm53-exl3-*` containers without the
-user's approval. Run the client from the Mac.
+GLM-5.3-Flash (DFlash2 drafter) with TP=2 across both nodes, at `http://100.90.44.53:8888/v1`
+over Tailscale. Since 2026-10 the server is tensorfold (container `glm53-flash-tf`, `--parallel 4`,
+adaptive draft depth); the README results up to 2026-09-28 came from vLLM (`glm53-exl3-*`,
+`--max-num-seqs 2`, 7 draft tokens). Check which one runs with `docker ps` on Martin. GPU memory
+is full, so only `--engine CLIENT` works. Never stop or restart the serving containers without
+the user's approval. Run the client from the Mac.
 
 1. Check that the server is up and idle. If requests are running, the numbers will be
    contaminated: wait, or tell the user.
 
    ```bash
-   curl -s http://100.90.44.53:8888/metrics | grep -E '^vllm:num_requests_(running|waiting)\{'
+   curl -s http://100.90.44.53:8888/metrics | grep -E '^(vllm:num_requests|tensorfold:requests)_(running|waiting)'
    ```
 
 2. Fetch the server's tokenizer and chat template, and the MT-Bench prompts, once:
@@ -69,19 +71,21 @@ user's approval. Run the client from the Mac.
        > $W/mtbench-$(date +%F).log 2>&1
    ```
 
-   Keep `--concurrency` at 2 or lower. Anything higher only waits in the server queue and
-   inflates time to first token.
+   Keep `--concurrency` at or below the server's limit (2 on vLLM, 4 on tensorfold). Anything
+   higher only waits in the server queue and inflates time to first token.
 
 4. Validate before you report numbers. The log must not contain `already has N request(s)
    running`. In `server_spec_decode.json`, `Server_Generation_Tokens` must equal the client's
    token count, which is the sum of `length × count` over `Acceptance_Length_Histogram` in
    `acceptance_rate.json`. The client's step count should exceed the server's `Num_Drafts` by
-   exactly the number of turns (160 for full MT-Bench).
+   exactly the number of turns (160 for full MT-Bench). On tensorfold a few rounds that end inside
+   a multi-byte character merge into one client step, so the step excess is a little lower (96 on
+   2026-10-04); `Num_Drafts + Num_Accepted_Tokens + 160` must still equal the token count.
 
 5. Report `Average_AL` (the per-request mean), the acceptance length over all tokens from the
-   client and from the server, the per-position acceptance rates, `Category_AL`, and the median
-   time to first token and request tokens/s from `timing.json`. Compare them against the results
-   table in `README.md`, and update that table only if the user asks.
+   client and from the server, the per-position acceptance rates (vLLM only), `Category_AL`, and
+   the median time to first token and request tokens/s from `timing.json`. Compare them against
+   the results table in `README.md`, and update that table only if the user asks.
 
 ## Coding guidelines
 

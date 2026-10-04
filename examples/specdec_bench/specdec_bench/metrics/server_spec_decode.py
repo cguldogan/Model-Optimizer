@@ -21,18 +21,29 @@ import httpx
 
 from .base import Metric
 
-_SAMPLE = re.compile(r"^(vllm:\w+)(?:\{([^}]*)\})?\s+(\S+)")
+_SAMPLE = re.compile(r"^(\w+:\w+)(?:\{([^}]*)\})?\s+(\S+)")
 _POSITION = re.compile(r'position="(\d+)"')
-_DRAFTS = ("vllm:spec_decode_num_drafts_total", None)
-_DRAFT_TOKENS = ("vllm:spec_decode_num_draft_tokens_total", None)
-_ACCEPTED = ("vllm:spec_decode_num_accepted_tokens_total", None)
-_ACCEPTED_PER_POS = "vllm:spec_decode_num_accepted_tokens_per_pos_total"
-_GENERATION_TOKENS = ("vllm:generation_tokens_total", None)
-_RUNNING = ("vllm:num_requests_running", None)
+_VLLM = {
+    "running": "vllm:num_requests_running",
+    "generation": "vllm:generation_tokens_total",
+    "drafts": "vllm:spec_decode_num_drafts_total",
+    "draft_tokens": "vllm:spec_decode_num_draft_tokens_total",
+    "accepted": "vllm:spec_decode_num_accepted_tokens_total",
+    "accepted_per_pos": "vllm:spec_decode_num_accepted_tokens_per_pos_total",
+}
+# tensorfold counts finished requests only, a draft per verify round, and no positions.
+_TENSORFOLD = {
+    "running": "tensorfold:requests_running",
+    "generation": "tensorfold:generation_tokens_total",
+    "drafts": "tensorfold_health:rounds_total",
+    "draft_tokens": "tensorfold:mtp_drafted_total",
+    "accepted": "tensorfold:mtp_accepted_total",
+    "accepted_per_pos": None,
+}
 
 
-def parse_vllm_metrics(text):
-    """Sum vLLM's Prometheus samples across engines and other labels, keyed by (name, position)."""
+def parse_metrics(text):
+    """Sum Prometheus samples across engines and other labels, keyed by (name, position)."""
     counters = defaultdict(float)
     for line in text.splitlines():
         match = _SAMPLE.match(line)
@@ -47,8 +58,9 @@ def parse_vllm_metrics(text):
 class ServerSpecDecode(Metric):
     """Server-side acceptance for ``--engine CLIENT``, from the server's ``/metrics`` counters.
 
-    Snapshots vLLM's ``vllm:spec_decode_*`` counters before and after the run and reports
-    the difference. It cross-checks the client-side acceptance length, which is inferred from
+    Snapshots vLLM's ``vllm:spec_decode_*`` counters, or tensorfold's ``tensorfold:mtp_*``
+    and ``tensorfold_health:rounds_total``, before and after the run and reports the
+    difference. It cross-checks the client-side acceptance length, which is inferred from
     streamed chunk sizes. The counters are server-wide, so other traffic sent to the server
     during the run is counted too: compare ``Server_Generation_Tokens`` with the client's
     output token count, and heed the warning printed when requests were already running.
@@ -61,9 +73,12 @@ class ServerSpecDecode(Metric):
         api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self.headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         self.start = self._snapshot()
-        if self.start is not None and self.start.get(_RUNNING, 0) > 0:
+        tensorfold = self.start is not None and (_TENSORFOLD["drafts"], None) in self.start
+        self.names = _TENSORFOLD if tensorfold else _VLLM
+        self.running = (self.names["running"], None)
+        if self.start is not None and self.start.get(self.running, 0) > 0:
             print(
-                f"Warning: {self.url} already has {self.start[_RUNNING]:.0f} request(s) running; "
+                f"Warning: {self.url} already has {self.start[self.running]:.0f} request(s) running; "
                 "they share the batch with this benchmark and are counted in the server metrics"
             )
 
@@ -74,7 +89,7 @@ class ServerSpecDecode(Metric):
         except httpx.HTTPError as e:
             print(f"Server spec-decode metrics unavailable at {self.url}: {e}")
             return None
-        return parse_vllm_metrics(response.text)
+        return parse_metrics(response.text)
 
     def process_step(self, step_outputs, request_id, turn_id):
         pass
@@ -84,19 +99,20 @@ class ServerSpecDecode(Metric):
         if self.start is None or end is None:
             return
         delta = {key: end[key] - self.start.get(key, 0.0) for key in end}
-        drafts = delta.get(_DRAFTS, 0.0)
+        names = self.names
+        drafts = delta.get((names["drafts"], None), 0.0)
         if drafts <= 0:
             print("Server reported no speculative drafts during the run")
             return
-        draft_tokens = delta.get(_DRAFT_TOKENS, 0.0)
-        accepted = delta.get(_ACCEPTED, 0.0)
+        draft_tokens = delta.get((names["draft_tokens"], None), 0.0)
+        accepted = delta.get((names["accepted"], None), 0.0)
         per_position = {
             position: value / drafts
             for (name, position), value in delta.items()
-            if name == _ACCEPTED_PER_POS
+            if name == names["accepted_per_pos"]
         }
-        self.out["Requests_Running_At_Start"] = self.start.get(_RUNNING, 0.0)
-        self.out["Server_Generation_Tokens"] = delta.get(_GENERATION_TOKENS, 0.0)
+        self.out["Requests_Running_At_Start"] = self.start.get(self.running, 0.0)
+        self.out["Server_Generation_Tokens"] = delta.get((names["generation"], None), 0.0)
         self.out["Num_Drafts"] = drafts
         self.out["Num_Draft_Tokens"] = draft_tokens
         self.out["Num_Accepted_Tokens"] = accepted
